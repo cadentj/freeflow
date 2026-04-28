@@ -124,6 +124,7 @@ private enum CommandInvocation: String {
 private enum SessionIntent {
     case dictation
     case command(invocation: CommandInvocation, selectedText: String)
+    case journal
 
     var isCommandMode: Bool {
         switch self {
@@ -131,6 +132,28 @@ private enum SessionIntent {
             return false
         case .command:
             return true
+        case .journal:
+            return false
+        }
+    }
+
+    var isJournalMode: Bool {
+        switch self {
+        case .journal:
+            return true
+        case .dictation, .command:
+            return false
+        }
+    }
+
+    var recordingOverlayMode: RecordingOverlayMode {
+        switch self {
+        case .dictation:
+            return .dictation
+        case .command:
+            return .edit
+        case .journal:
+            return .journal
         }
     }
 
@@ -145,12 +168,14 @@ private enum SessionIntent {
             case .manual:
                 return .commandManual
             }
+        case .journal:
+            return .journal
         }
     }
 
     var persistedSelectedText: String? {
         switch self {
-        case .dictation:
+        case .dictation, .journal:
             return nil
         case .command(_, let selectedText):
             return selectedText
@@ -167,6 +192,9 @@ private enum SessionIntent {
     }
 
     static func fromPersisted(intent: PipelineHistoryItemIntent, selectedText: String?) -> SessionIntent {
+        if intent == .journal {
+            return .journal
+        }
         if intent == .commandAutomatic, let selectedText {
             return .command(invocation: .automatic, selectedText: selectedText)
         }
@@ -211,6 +239,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let commandModeEnabledStorageKey = "command_mode_enabled"
     private let commandModeStyleStorageKey = "command_mode_style"
     private let commandModeManualModifierStorageKey = "command_mode_manual_modifier"
+    private let journalModeEnabledStorageKey = "journal_mode_enabled"
+    private let journalModeModifierStorageKey = "journal_mode_modifier"
+    private let journalModeFolderPathStorageKey = "journal_mode_folder_path"
+    private let journalModeFolderBookmarkStorageKey = "journal_mode_folder_bookmark"
     private let outputLanguageStorageKey = "output_language"
     private let realtimeStreamingEnabledStorageKey = "realtime_streaming_enabled"
     private let realtimeStreamingModelStorageKey = "realtime_streaming_model"
@@ -362,6 +394,36 @@ final class AppState: ObservableObject, @unchecked Sendable {
         didSet {
             UserDefaults.standard.set(commandModeManualModifier.rawValue, forKey: commandModeManualModifierStorageKey)
             restartHotkeyMonitoring()
+        }
+    }
+
+    @Published private(set) var isJournalModeEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isJournalModeEnabled, forKey: journalModeEnabledStorageKey)
+            restartHotkeyMonitoring()
+        }
+    }
+
+    @Published private(set) var journalModeModifier: JournalModeModifier {
+        didSet {
+            UserDefaults.standard.set(journalModeModifier.rawValue, forKey: journalModeModifierStorageKey)
+            restartHotkeyMonitoring()
+        }
+    }
+
+    @Published private(set) var journalModeFolderPath: String {
+        didSet {
+            UserDefaults.standard.set(journalModeFolderPath, forKey: journalModeFolderPathStorageKey)
+        }
+    }
+
+    @Published private(set) var journalModeFolderBookmark: Data? {
+        didSet {
+            if let journalModeFolderBookmark {
+                UserDefaults.standard.set(journalModeFolderBookmark, forKey: journalModeFolderBookmarkStorageKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: journalModeFolderBookmarkStorageKey)
+            }
         }
     }
 
@@ -554,6 +616,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var currentSessionIntent: SessionIntent = .dictation
     private var pendingSelectionSnapshot: AppSelectionSnapshot?
     private var pendingManualCommandInvocation = false
+    private var pendingJournalModeInvocation = false
     private var pendingShortcutStartTask: Task<Void, Never>?
     private var pendingShortcutStartMode: RecordingTriggerMode?
     private var realtimeService: RealtimeTranscriptionService?
@@ -565,6 +628,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var pendingMicrophonePermissionTriggerMode: RecordingTriggerMode?
     private var pendingMicrophonePermissionSelectionSnapshot: AppSelectionSnapshot?
     private var pendingMicrophonePermissionManualCommandRequested: Bool?
+    private var pendingMicrophonePermissionJournalRequested: Bool?
     private let postTranscriptionUpdateReminderDuration: TimeInterval = 7
 
     init() {
@@ -613,6 +677,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let commandModeManualModifier = CommandModeManualModifier(
             rawValue: UserDefaults.standard.string(forKey: commandModeManualModifierStorageKey) ?? ""
         ) ?? .option
+        let isJournalModeEnabled = UserDefaults.standard.bool(forKey: journalModeEnabledStorageKey)
+        let journalModeModifier = JournalModeModifier(
+            rawValue: UserDefaults.standard.string(forKey: journalModeModifierStorageKey) ?? ""
+        ) ?? .control
+        let journalModeFolderBookmark = UserDefaults.standard.data(forKey: journalModeFolderBookmarkStorageKey)
+        let journalModeFolderPath = UserDefaults.standard.string(forKey: journalModeFolderPathStorageKey)
+            ?? JournalLogStore.defaultFolderURL.path
         let preserveClipboard = UserDefaults.standard.object(forKey: preserveClipboardStorageKey) == nil
             ? true
             : UserDefaults.standard.bool(forKey: preserveClipboardStorageKey)
@@ -676,6 +747,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.isCommandModeEnabled = isCommandModeEnabled
         self.commandModeStyle = commandModeStyle
         self.commandModeManualModifier = commandModeManualModifier
+        self.isJournalModeEnabled = isJournalModeEnabled
+        self.journalModeModifier = journalModeModifier
+        self.journalModeFolderPath = journalModeFolderPath
+        self.journalModeFolderBookmark = journalModeFolderBookmark
         self.customVocabulary = customVocabulary
         self.transcriptionLanguage = transcriptionLanguage
         self.customSystemPrompt = customSystemPrompt
@@ -1082,6 +1157,53 @@ final class AppState: ObservableObject, @unchecked Sendable {
             do {
                 let transcriptionService = try makeTranscriptionService()
                 let rawTranscript = try await transcriptionService.transcribe(fileURL: audioURL)
+                let restoredIntent = SessionIntent.fromPersisted(
+                    intent: item.intent,
+                    selectedText: item.selectedText
+                )
+                if restoredIntent.isJournalMode {
+                    let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let journalFileURL = try JournalLogStore(
+                        folderURL: self.resolvedJournalModeFolderURL
+                    ).append(rawTranscript: rawTranscript)
+                    let processingStatus = journalFileURL == nil
+                        ? "Skipped empty raw transcript (retried)"
+                        : "Logged raw transcript to journal (retried)"
+
+                    await MainActor.run {
+                        let updatedItem = PipelineHistoryItem(
+                            intent: item.intent,
+                            selectedText: item.selectedText,
+                            capturedSelection: item.capturedSelection,
+                            id: item.id,
+                            timestamp: item.timestamp,
+                            rawTranscript: trimmedRawTranscript,
+                            postProcessedTranscript: trimmedRawTranscript,
+                            postProcessingPrompt: "",
+                            systemPrompt: item.systemPrompt,
+                            contextSummary: item.contextSummary,
+                            contextSystemPrompt: item.contextSystemPrompt,
+                            contextPrompt: item.contextPrompt,
+                            contextScreenshotDataURL: item.contextScreenshotDataURL,
+                            contextScreenshotStatus: item.contextScreenshotStatus,
+                            postProcessingStatus: processingStatus,
+                            debugStatus: "Retried",
+                            customVocabulary: item.customVocabulary,
+                            audioFileName: item.audioFileName,
+                            contextAppName: item.contextAppName,
+                            contextBundleIdentifier: item.contextBundleIdentifier,
+                            contextWindowTitle: item.contextWindowTitle
+                        )
+                        do {
+                            try pipelineHistoryStore.update(updatedItem)
+                            pipelineHistory = pipelineHistoryStore.loadAllHistory()
+                        } catch {
+                            errorMessage = "Failed to save retry result: \(error.localizedDescription)"
+                        }
+                        retryingItemIDs.remove(item.id)
+                    }
+                    return
+                }
                 let parsedTranscript = Self.parseTranscriptCommands(
                     from: rawTranscript,
                     pressEnterCommandEnabled: self.isPressEnterVoiceCommandEnabled
@@ -1090,10 +1212,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 let finalTranscript: String
                 let processingStatus: String
                 let postProcessingPrompt: String
-                let restoredIntent = SessionIntent.fromPersisted(
-                    intent: item.intent,
-                    selectedText: item.selectedText
-                )
                 let result = await self.processTranscript(
                     parsedTranscript.transcript,
                     intent: restoredIntent,
@@ -1383,6 +1501,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
         return commandModeManualModifierCollisionMessage(for: commandModeManualModifier)
     }
 
+    var journalModeModifierValidationMessage: String? {
+        guard isJournalModeEnabled else { return nil }
+        return journalModeModifierCollisionMessage(for: journalModeModifier)
+    }
+
+    var resolvedJournalModeFolderURL: URL {
+        JournalLogStore.resolveFolderURL(
+            bookmarkData: journalModeFolderBookmark,
+            plainPath: journalModeFolderPath
+        )
+    }
+
+    var resolvedJournalModeFolderDisplayPath: String {
+        resolvedJournalModeFolderURL.path
+    }
+
     @discardableResult
     func setCommandModeEnabled(_ enabled: Bool) -> String? {
         isCommandModeEnabled = enabled
@@ -1408,9 +1542,43 @@ final class AppState: ObservableObject, @unchecked Sendable {
            let message = commandModeManualModifierCollisionMessage(for: modifier) {
             return message
         }
+        if isJournalModeEnabled,
+           journalModeModifier == modifier.journalModeModifier {
+            return "Edit Mode and Journal Mode must use different extra modifiers."
+        }
 
         commandModeManualModifier = modifier
         return nil
+    }
+
+    @discardableResult
+    func setJournalModeEnabled(_ enabled: Bool) -> String? {
+        isJournalModeEnabled = enabled
+        if enabled {
+            return journalModeModifierCollisionMessage(for: journalModeModifier)
+        }
+        return nil
+    }
+
+    @discardableResult
+    func setJournalModeModifier(_ modifier: JournalModeModifier) -> String? {
+        if isJournalModeEnabled,
+           let message = journalModeModifierCollisionMessage(for: modifier) {
+            return message
+        }
+
+        journalModeModifier = modifier
+        return nil
+    }
+
+    func setJournalModeFolderURL(_ url: URL) {
+        journalModeFolderPath = url.path
+        journalModeFolderBookmark = JournalLogStore.makeBookmarkData(for: url)
+    }
+
+    func resetJournalModeFolder() {
+        journalModeFolderPath = JournalLogStore.defaultFolderURL.path
+        journalModeFolderBookmark = nil
     }
 
     @discardableResult
@@ -1429,6 +1597,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
            commandModeStyle == .manual,
            let message = commandModeManualModifierCollisionMessage(
             for: commandModeManualModifier,
+            holdBinding: nextHoldShortcut,
+            toggleBinding: nextToggleShortcut
+           ) {
+            return message
+        }
+        if isJournalModeEnabled,
+           let message = journalModeModifierCollisionMessage(
+            for: journalModeModifier,
             holdBinding: nextHoldShortcut,
             toggleBinding: nextToggleShortcut
            ) {
@@ -1460,14 +1636,50 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let toggleBinding = toggleBinding ?? toggleShortcut
         let manualModifier = modifier.shortcutModifier
 
-        if !holdBinding.isDisabled && holdBinding.modifiers.contains(manualModifier) {
+        if shortcutBinding(holdBinding, references: manualModifier) {
             return "That modifier is already part of the hold shortcut."
         }
-        if !toggleBinding.isDisabled && toggleBinding.modifiers.contains(manualModifier) {
+        if shortcutBinding(toggleBinding, references: manualModifier) {
             return "That modifier is already part of the tap shortcut."
         }
 
         return nil
+    }
+
+    private func journalModeModifierCollisionMessage(
+        for modifier: JournalModeModifier,
+        holdBinding: ShortcutBinding? = nil,
+        toggleBinding: ShortcutBinding? = nil
+    ) -> String? {
+        let holdBinding = holdBinding ?? holdShortcut
+        let toggleBinding = toggleBinding ?? toggleShortcut
+        let journalModifier = modifier.shortcutModifier
+
+        if shortcutBinding(holdBinding, references: journalModifier) {
+            return "That modifier is already part of the hold shortcut."
+        }
+        if shortcutBinding(toggleBinding, references: journalModifier) {
+            return "That modifier is already part of the tap shortcut."
+        }
+        if isCommandModeEnabled,
+           commandModeStyle == .manual,
+           commandModeManualModifier == modifier.commandModeManualModifier {
+            return "Edit Mode and Journal Mode must use different extra modifiers."
+        }
+
+        return nil
+    }
+
+    private func shortcutBinding(_ binding: ShortcutBinding, references modifier: ShortcutModifiers) -> Bool {
+        guard !binding.isDisabled else { return false }
+        if binding.modifiers.contains(modifier) {
+            return true
+        }
+        if binding.kind == .modifierKey,
+           ShortcutBinding.logicalModifier(forKeyCode: binding.keyCode) == modifier {
+            return true
+        }
+        return false
     }
 
     func startHotkeyMonitoring() {
@@ -1502,11 +1714,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private var activeShortcutConfiguration: ShortcutConfiguration {
-        let permittedAdditionalExactMatchModifiers: ShortcutModifiers
+        var permittedAdditionalExactMatchModifiers: ShortcutModifiers = []
         if isCommandModeEnabled, commandModeStyle == .manual {
-            permittedAdditionalExactMatchModifiers = commandModeManualModifier.shortcutModifier
-        } else {
-            permittedAdditionalExactMatchModifiers = []
+            permittedAdditionalExactMatchModifiers.insert(commandModeManualModifier.shortcutModifier)
+        }
+        if isJournalModeEnabled {
+            permittedAdditionalExactMatchModifiers.insert(journalModeModifier.shortcutModifier)
         }
 
         return ShortcutConfiguration(
@@ -1603,6 +1816,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         contextCaptureTask = nil
         capturedContext = nil
         currentSessionIntent = .dictation
+        pendingJournalModeInvocation = false
         isRecording = false
         errorMessage = nil
         debugStatusMessage = "Cancelled"
@@ -1628,6 +1842,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
         currentSessionIntent = .dictation
+        pendingJournalModeInvocation = false
         isRecording = false
         isTranscribing = false
         errorMessage = nil
@@ -1650,6 +1865,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         pendingSelectionSnapshot = contextService.collectSelectionSnapshot()
         pendingManualCommandInvocation = hotkeyManager.currentPressedModifiers.contains(
             commandModeManualModifier.shortcutModifier
+        )
+        pendingJournalModeInvocation = hotkeyManager.currentPressedModifiers.contains(
+            journalModeModifier.shortcutModifier
         )
         pendingShortcutStartMode = mode
         let delay = shortcutStartDelay
@@ -1681,6 +1899,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         pendingShortcutStartTask = nil
         pendingSelectionSnapshot = nil
         pendingManualCommandInvocation = false
+        pendingJournalModeInvocation = false
         if resetMode {
             pendingShortcutStartMode = nil
         }
@@ -1689,14 +1908,36 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func resolveSessionIntent(
         triggerMode: RecordingTriggerMode,
         selectionSnapshot: AppSelectionSnapshot,
-        manualCommandRequested: Bool
+        manualCommandRequested: Bool,
+        journalModeRequested: Bool
     ) -> SessionIntent? {
-        guard isCommandModeEnabled else {
-            return .dictation
+        if isJournalModeEnabled,
+           journalModeRequested,
+           let message = journalModeModifierCollisionMessage(for: journalModeModifier) {
+            rejectInvalidJournalModeModifier(triggerMode: triggerMode, message: message)
+            return nil
         }
 
         let rawSelectedText = selectionSnapshot.selectedText ?? ""
         let trimmedSelectedText = rawSelectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let automaticCommandRequested = isCommandModeEnabled
+            && commandModeStyle == .automatic
+            && !trimmedSelectedText.isEmpty
+        let commandRequested = isCommandModeEnabled
+            && (automaticCommandRequested || (commandModeStyle == .manual && manualCommandRequested))
+
+        if isJournalModeEnabled, journalModeRequested, commandRequested {
+            rejectAmbiguousModeRequest(triggerMode: triggerMode)
+            return nil
+        }
+
+        if isJournalModeEnabled, journalModeRequested {
+            return .journal
+        }
+
+        guard isCommandModeEnabled else {
+            return .dictation
+        }
 
         switch commandModeStyle {
         case .automatic:
@@ -1725,6 +1966,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         activeRecordingTriggerMode = nil
         pendingSelectionSnapshot = nil
         pendingManualCommandInvocation = false
+        pendingJournalModeInvocation = false
         errorMessage = "Select text to transform first."
         statusText = "Select text to transform first"
         debugStatusMessage = "Edit mode requires selected text"
@@ -1741,6 +1983,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         activeRecordingTriggerMode = nil
         pendingSelectionSnapshot = nil
         pendingManualCommandInvocation = false
+        pendingJournalModeInvocation = false
         errorMessage = message
         statusText = "Fix Edit Mode modifier"
         debugStatusMessage = "Edit mode modifier conflicts with dictation shortcuts"
@@ -1752,12 +1995,47 @@ final class AppState: ObservableObject, @unchecked Sendable {
         scheduleReadyStatusReset(after: 2, matching: ["Fix Edit Mode modifier"])
     }
 
+    private func rejectInvalidJournalModeModifier(triggerMode: RecordingTriggerMode, message: String) {
+        currentSessionIntent = .dictation
+        activeRecordingTriggerMode = nil
+        pendingSelectionSnapshot = nil
+        pendingManualCommandInvocation = false
+        pendingJournalModeInvocation = false
+        errorMessage = message
+        statusText = "Fix Journal Mode modifier"
+        debugStatusMessage = "Journal mode modifier conflicts with dictation shortcuts"
+        shortcutSessionController.reset()
+        if triggerMode == .toggle {
+            cancelPendingShortcutStart()
+        }
+        playAlertSound(named: "Basso")
+        scheduleReadyStatusReset(after: 2, matching: ["Fix Journal Mode modifier"])
+    }
+
+    private func rejectAmbiguousModeRequest(triggerMode: RecordingTriggerMode) {
+        currentSessionIntent = .dictation
+        activeRecordingTriggerMode = nil
+        pendingSelectionSnapshot = nil
+        pendingManualCommandInvocation = false
+        pendingJournalModeInvocation = false
+        errorMessage = "Use either Edit Mode or Journal Mode, not both at once."
+        statusText = "Choose one mode"
+        debugStatusMessage = "Edit Mode and Journal Mode were both requested"
+        shortcutSessionController.reset()
+        if triggerMode == .toggle {
+            cancelPendingShortcutStart()
+        }
+        playAlertSound(named: "Basso")
+        scheduleReadyStatusReset(after: 2, matching: ["Choose one mode"])
+    }
+
     private func startRecording(triggerMode: RecordingTriggerMode) {
         let t0 = CFAbsoluteTimeGetCurrent()
         os_log(.info, log: recordingLog, "startRecording() entered")
         guard !isRecording && !isTranscribing else { return }
         let scheduledSelectionSnapshot = pendingSelectionSnapshot
         let scheduledManualCommandInvocation = pendingManualCommandInvocation
+        let scheduledJournalModeInvocation = pendingJournalModeInvocation
         cancelPendingShortcutStart()
         guard prepareRecordingStart(
             triggerMode: triggerMode,
@@ -1765,6 +2043,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             manualCommandRequested: scheduledSelectionSnapshot == nil
                 ? hotkeyManager.currentPressedModifiers.contains(commandModeManualModifier.shortcutModifier)
                 : scheduledManualCommandInvocation,
+            journalModeRequested: scheduledSelectionSnapshot == nil
+                ? hotkeyManager.currentPressedModifiers.contains(journalModeModifier.shortcutModifier)
+                : scheduledJournalModeInvocation,
             startedAt: t0
         ) else { return }
         guard ensureMicrophoneAccess() else { return }
@@ -1778,6 +2059,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         triggerMode: RecordingTriggerMode,
         selectionSnapshot: AppSelectionSnapshot? = nil,
         manualCommandRequested: Bool? = nil,
+        journalModeRequested: Bool? = nil,
         startedAt: CFAbsoluteTime? = nil
     ) -> Bool {
         activeRecordingTriggerMode = triggerMode
@@ -1797,10 +2079,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let selectionSnapshot = selectionSnapshot ?? contextService.collectSelectionSnapshot()
         let manualCommandRequested = manualCommandRequested
             ?? hotkeyManager.currentPressedModifiers.contains(commandModeManualModifier.shortcutModifier)
+        let journalModeRequested = journalModeRequested
+            ?? hotkeyManager.currentPressedModifiers.contains(journalModeModifier.shortcutModifier)
         guard let resolvedIntent = resolveSessionIntent(
             triggerMode: triggerMode,
             selectionSnapshot: selectionSnapshot,
-            manualCommandRequested: manualCommandRequested
+            manualCommandRequested: manualCommandRequested,
+            journalModeRequested: journalModeRequested
         ) else { return false }
 
         if resolvedIntent.isCommandMode {
@@ -1848,7 +2133,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             prepareForMicrophonePermissionPrompt(
                 triggerMode: triggerMode,
                 selectionSnapshot: pendingSelectionSnapshot ?? contextService.collectSelectionSnapshot(),
-                manualCommandRequested: currentSessionIntent.isManualCommand
+                manualCommandRequested: currentSessionIntent.isManualCommand,
+                journalModeRequested: currentSessionIntent.isJournalMode
             )
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
@@ -1856,9 +2142,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     let pendingTriggerMode = strongSelf.pendingMicrophonePermissionTriggerMode
                     let pendingSelectionSnapshot = strongSelf.pendingMicrophonePermissionSelectionSnapshot
                     let pendingManualCommandRequested = strongSelf.pendingMicrophonePermissionManualCommandRequested
+                    let pendingJournalRequested = strongSelf.pendingMicrophonePermissionJournalRequested
                     strongSelf.pendingMicrophonePermissionTriggerMode = nil
                     strongSelf.pendingMicrophonePermissionSelectionSnapshot = nil
                     strongSelf.pendingMicrophonePermissionManualCommandRequested = nil
+                    strongSelf.pendingMicrophonePermissionJournalRequested = nil
                     strongSelf.isAwaitingMicrophonePermission = false
                     strongSelf.restartHotkeyMonitoring()
 
@@ -1869,7 +2157,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             guard strongSelf.prepareRecordingStart(
                                 triggerMode: .toggle,
                                 selectionSnapshot: pendingSelectionSnapshot,
-                                manualCommandRequested: pendingManualCommandRequested
+                                manualCommandRequested: pendingManualCommandRequested,
+                                journalModeRequested: pendingJournalRequested
                             ) else { return }
                             strongSelf.shortcutSessionController.beginManual(mode: .toggle)
                             strongSelf.applyAudioInterruptionIfNeeded()
@@ -1907,12 +2196,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func prepareForMicrophonePermissionPrompt(
         triggerMode: RecordingTriggerMode,
         selectionSnapshot: AppSelectionSnapshot?,
-        manualCommandRequested: Bool?
+        manualCommandRequested: Bool?,
+        journalModeRequested: Bool?
     ) {
         isAwaitingMicrophonePermission = true
         pendingMicrophonePermissionTriggerMode = triggerMode
         pendingMicrophonePermissionSelectionSnapshot = selectionSnapshot
         pendingMicrophonePermissionManualCommandRequested = manualCommandRequested
+        pendingMicrophonePermissionJournalRequested = journalModeRequested
         hotkeyManager.stop()
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
@@ -1969,7 +2260,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             self.clearPendingOverlayDismissToken()
             self.overlayManager.showInitializing(
                 mode: self.activeRecordingTriggerMode ?? triggerMode,
-                isCommandMode: self.currentSessionIntent.isCommandMode
+                recordingMode: self.currentSessionIntent.recordingOverlayMode
             )
         }
         initTimer.resume()
@@ -1986,12 +2277,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 if overlayShown {
                     self.overlayManager.transitionToRecording(
                         mode: self.activeRecordingTriggerMode ?? triggerMode,
-                        isCommandMode: self.currentSessionIntent.isCommandMode
+                        recordingMode: self.currentSessionIntent.recordingOverlayMode
                     )
                 } else {
                     self.overlayManager.showRecording(
                         mode: self.activeRecordingTriggerMode ?? triggerMode,
-                        isCommandMode: self.currentSessionIntent.isCommandMode
+                        recordingMode: self.currentSessionIntent.recordingOverlayMode
                     )
                 }
                 overlayShown = true
@@ -2017,7 +2308,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 os_log(.info, log: recordingLog, "audioRecorder.startRecording() done: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
                 DispatchQueue.main.async {
                     guard self.isRecording, self.activeRecordingTriggerMode != nil else { return }
-                    self.startContextCapture()
+                    if !self.currentSessionIntent.isJournalMode {
+                        self.startContextCapture()
+                    }
                     self.audioLevelCancellable = self.audioRecorder.$audioLevel
                         .receive(on: DispatchQueue.main)
                         .sink { [weak self] level in
@@ -2056,6 +2349,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         activeRecordingTriggerMode = nil
         currentSessionIntent = .dictation
+        pendingJournalModeInvocation = false
         shortcutSessionController.reset()
         errorMessage = formattedRecordingStartError(error)
         statusText = "Error"
@@ -2380,6 +2674,102 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         fileURL: transcriptionFileURL
                     )
                     let rawTranscript = try await transcript
+                    if sessionIntent.isJournalMode {
+                        try Task.checkCancellation()
+                        let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let appContext = self.journalContextAtStop()
+                        let journalFileURL: URL?
+                        do {
+                            journalFileURL = try JournalLogStore(
+                                folderURL: self.resolvedJournalModeFolderURL
+                            ).append(rawTranscript: rawTranscript)
+                        } catch {
+                            await MainActor.run {
+                                guard self.isTranscribing else { return }
+                                self.transcriptionTask = nil
+                                self.transcribingAudioFileName = nil
+                                self.errorMessage = "Unable to write journal: \(error.localizedDescription)"
+                                self.isTranscribing = false
+                                self.statusText = "Journal error"
+                                self.debugStatusMessage = "Journal write failed"
+                                self.lastTranscript = ""
+                                self.lastRawTranscript = trimmedRawTranscript
+                                self.lastPostProcessedTranscript = ""
+                                self.lastContextSummary = appContext.contextSummary
+                                self.lastPostProcessingStatus = "Error: \(error.localizedDescription)"
+                                self.lastPostProcessingPrompt = ""
+                                self.lastContextScreenshotDataURL = nil
+                                self.lastContextScreenshotStatus = "Journal Mode skips app context capture"
+                                self.recordPipelineHistoryEntry(
+                                    rawTranscript: trimmedRawTranscript,
+                                    postProcessedTranscript: "",
+                                    postProcessingPrompt: "",
+                                    systemPrompt: "",
+                                    context: appContext,
+                                    processingStatus: "Error: \(error.localizedDescription)",
+                                    intent: sessionIntent,
+                                    audioFileName: savedAudioFile?.fileName
+                                )
+                                self.overlayManager.dismiss()
+                                self.audioRecorder.cleanup()
+                                self.refreshAvailableMicrophonesIfNeeded()
+                                self.scheduleReadyStatusReset(after: 3, matching: ["Journal error"])
+                            }
+                            return
+                        }
+
+                        try Task.checkCancellation()
+                        await MainActor.run {
+                            guard self.isTranscribing else { return }
+                            self.transcriptionTask = nil
+                            self.transcribingAudioFileName = nil
+                            self.errorMessage = nil
+                            self.isTranscribing = false
+                            self.debugStatusMessage = "Done"
+                            self.lastTranscript = trimmedRawTranscript
+                            self.lastRawTranscript = trimmedRawTranscript
+                            self.lastPostProcessedTranscript = trimmedRawTranscript
+                            self.lastPostProcessingPrompt = ""
+                            self.lastContextSummary = appContext.contextSummary
+                            self.lastContextScreenshotDataURL = nil
+                            self.lastContextScreenshotStatus = "Journal Mode skips app context capture"
+                            self.lastContextAppName = appContext.appName ?? ""
+                            self.lastContextBundleIdentifier = appContext.bundleIdentifier ?? ""
+                            self.lastContextWindowTitle = appContext.windowTitle ?? ""
+                            self.lastContextSelectedText = ""
+                            self.lastContextLLMPrompt = ""
+
+                            let processingStatus = journalFileURL == nil
+                                ? "Skipped empty raw transcript"
+                                : "Logged raw transcript to journal"
+                            self.lastPostProcessingStatus = processingStatus
+                            self.recordPipelineHistoryEntry(
+                                rawTranscript: trimmedRawTranscript,
+                                postProcessedTranscript: trimmedRawTranscript,
+                                postProcessingPrompt: "",
+                                systemPrompt: "",
+                                context: appContext,
+                                processingStatus: processingStatus,
+                                intent: sessionIntent,
+                                audioFileName: savedAudioFile?.fileName
+                            )
+
+                            let completionStatusText = journalFileURL == nil
+                                ? "Nothing to journal"
+                                : "Logged to journal"
+                            self.statusText = completionStatusText
+                            self.clearPendingOverlayDismissToken()
+                            self.overlayManager.dismiss()
+                            self.audioRecorder.cleanup()
+                            self.refreshAvailableMicrophonesIfNeeded()
+                            self.scheduleReadyStatusReset(
+                                after: 3,
+                                matching: ["Logged to journal", "Nothing to journal"]
+                            )
+                        }
+                        return
+                    }
+
                     let parsedTranscript = Self.parseTranscriptCommands(
                         from: rawTranscript,
                         pressEnterCommandEnabled: self.isPressEnterVoiceCommandEnabled
@@ -2666,6 +3056,23 @@ final class AppState: ObservableObject, @unchecked Sendable {
             screenshotDataURL: nil,
             screenshotMimeType: nil,
             screenshotError: "No app context captured before stop"
+        )
+    }
+
+    private func journalContextAtStop() -> AppContext {
+        let frontmostApp = NSWorkspace.shared.frontmostApplication
+        let windowTitle = focusedWindowTitle(for: frontmostApp)
+        return AppContext(
+            appName: frontmostApp?.localizedName,
+            bundleIdentifier: frontmostApp?.bundleIdentifier,
+            windowTitle: windowTitle,
+            selectedText: nil,
+            currentActivity: "Journal Mode skips app context capture and writes the raw transcript to Markdown.",
+            contextSystemPrompt: nil,
+            contextPrompt: nil,
+            screenshotDataURL: nil,
+            screenshotMimeType: nil,
+            screenshotError: "Journal Mode skips app context capture"
         )
     }
 

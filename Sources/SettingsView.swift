@@ -644,6 +644,9 @@ struct GeneralSettingsView: View {
                 SettingsCard("Edit Mode", icon: "pencil") {
                     commandModeSection
                 }
+                SettingsCard("Journal Mode", icon: "book.closed.fill") {
+                    journalModeSection
+                }
                 SettingsCard("Clipboard", icon: "doc.on.clipboard") {
                     clipboardSection
                 }
@@ -1102,6 +1105,92 @@ struct GeneralSettingsView: View {
                     .foregroundStyle(.red)
             }
         }
+    }
+
+    private var journalModeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle("Enable Journal Mode", isOn: Binding(
+                get: { appState.isJournalModeEnabled },
+                set: { newValue in
+                    _ = appState.setJournalModeEnabled(newValue)
+                }
+            ))
+
+            Text("Hold the extra modifier together with your normal dictation shortcut to append the raw transcript to today's Markdown journal.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Extra Modifier", selection: Binding(
+                get: { appState.journalModeModifier },
+                set: { newValue in
+                    _ = appState.setJournalModeModifier(newValue)
+                }
+            )) {
+                ForEach(JournalModeModifier.allCases) { modifier in
+                    Text(modifier.title).tag(modifier)
+                }
+            }
+            .disabled(!appState.isJournalModeEnabled)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Output Folder")
+                    .font(.caption.weight(.semibold))
+
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(appState.resolvedJournalModeFolderDisplayPath)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+
+                    Spacer()
+
+                    Button("Choose...") {
+                        chooseJournalFolder()
+                    }
+                    .font(.caption)
+
+                    Button("Open Folder") {
+                        openJournalFolder()
+                    }
+                    .font(.caption)
+
+                    Button("Reset") {
+                        appState.resetJournalModeFolder()
+                    }
+                    .font(.caption)
+                }
+            }
+            .disabled(!appState.isJournalModeEnabled)
+            .opacity(appState.isJournalModeEnabled ? 1 : 0.5)
+
+            if let validationMessage = appState.journalModeModifierValidationMessage {
+                Label(validationMessage, systemImage: "xmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func chooseJournalFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Journal Folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = appState.resolvedJournalModeFolderURL
+
+        if panel.runModal() == .OK, let url = panel.url {
+            appState.setJournalModeFolderURL(url)
+        }
+    }
+
+    private func openJournalFolder() {
+        let folderURL = appState.resolvedJournalModeFolderURL
+        try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(folderURL)
     }
 
     // MARK: Clipboard

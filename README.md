@@ -1,3 +1,34 @@
+## Local Journal Mode Build Notes
+
+NOTE: This is my personal fork of Freeflow with a "Journal Mode". 
+
+You can hold your normal dictation shortcut with the configured extra modifier to append the trimmed raw transcript to a daily Markdown file, without cleanup, paste, clipboard writes, voice macros, translation, or "press enter" handling.
+
+**I do not plan to upstream changes since the original repo is quite slop (commits directly to main, no directory structure and unorganized files). I plan to do a cleanup of this project at some point and fix up the UI, etc.**
+
+Build the local dev app:
+
+```bash
+make -B all CODESIGN_IDENTITY=-
+```
+
+Run it from the repo:
+
+```bash
+open "build/FreeFlow Dev.app"
+```
+
+Move the rebuilt dev app into Applications:
+
+```bash
+rm -rf "/Applications/FreeFlow Dev.app"
+cp -R "build/FreeFlow Dev.app" "/Applications/FreeFlow Dev.app"
+```
+
+Quit the official FreeFlow while testing `FreeFlow Dev`, since both apps can compete for the same global shortcuts.
+
+---
+
 <p align="center">
   <img src="Resources/AppIcon-Source.png" width="128" height="128" alt="FreeFlow icon">
 </p>

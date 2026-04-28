@@ -7,9 +7,30 @@ final class RecordingOverlayState: ObservableObject {
     @Published var phase: OverlayPhase = .recording
     @Published var audioLevel: Float = 0.0
     @Published var recordingTriggerMode: RecordingTriggerMode = .hold
-    @Published var isCommandMode = false
+    @Published var recordingMode: RecordingOverlayMode = .dictation
     @Published var showsTranscribingSpinner = false
     @Published var updateVersion: String = ""
+}
+
+enum RecordingOverlayMode: Equatable {
+    case dictation
+    case edit
+    case journal
+
+    var hasModeIndicator: Bool {
+        self != .dictation
+    }
+
+    var indicatorSystemImage: String? {
+        switch self {
+        case .dictation:
+            return nil
+        case .edit:
+            return "pencil"
+        case .journal:
+            return "book.closed.fill"
+        }
+    }
 }
 
 enum OverlayPhase {
@@ -89,11 +110,11 @@ final class RecordingOverlayManager {
             || overlayState.phase == .updateAvailable
     }
 
-    func showInitializing(mode: RecordingTriggerMode = .hold, isCommandMode: Bool = false) {
+    func showInitializing(mode: RecordingTriggerMode = .hold, recordingMode: RecordingOverlayMode = .dictation) {
         DispatchQueue.main.async {
             self.lockedOverlayWidth = nil
             self.overlayState.recordingTriggerMode = mode
-            self.overlayState.isCommandMode = isCommandMode
+            self.overlayState.recordingMode = recordingMode
             self.overlayState.phase = .initializing
             self.overlayState.showsTranscribingSpinner = false
             self.overlayState.audioLevel = 0
@@ -101,11 +122,11 @@ final class RecordingOverlayManager {
         }
     }
 
-    func showRecording(mode: RecordingTriggerMode = .hold, isCommandMode: Bool = false) {
+    func showRecording(mode: RecordingTriggerMode = .hold, recordingMode: RecordingOverlayMode = .dictation) {
         DispatchQueue.main.async {
             self.lockedOverlayWidth = nil
             self.overlayState.recordingTriggerMode = mode
-            self.overlayState.isCommandMode = isCommandMode
+            self.overlayState.recordingMode = recordingMode
             self.overlayState.phase = .recording
             self.overlayState.showsTranscribingSpinner = false
             self.overlayState.audioLevel = 0
@@ -113,11 +134,11 @@ final class RecordingOverlayManager {
         }
     }
 
-    func transitionToRecording(mode: RecordingTriggerMode = .hold, isCommandMode: Bool = false) {
+    func transitionToRecording(mode: RecordingTriggerMode = .hold, recordingMode: RecordingOverlayMode = .dictation) {
         DispatchQueue.main.async {
             self.lockedOverlayWidth = nil
             self.overlayState.recordingTriggerMode = mode
-            self.overlayState.isCommandMode = isCommandMode
+            self.overlayState.recordingMode = recordingMode
             self.overlayState.phase = .recording
             self.overlayState.showsTranscribingSpinner = false
             self.updateOverlayLayout(animated: true)
@@ -158,7 +179,7 @@ final class RecordingOverlayManager {
     func showUpdateAvailable(version: String) {
         DispatchQueue.main.async {
             self.lockedOverlayWidth = nil
-            self.overlayState.isCommandMode = false
+            self.overlayState.recordingMode = .dictation
             self.overlayState.showsTranscribingSpinner = false
             self.overlayState.updateVersion = version
             self.overlayState.phase = .updateAvailable
@@ -278,13 +299,13 @@ final class RecordingOverlayManager {
             return max(notchWidth, updateWidth)
         }
 
-        let commandModeWidth: CGFloat = 180
+        let modeWidth: CGFloat = 180
         let toggleWidth: CGFloat = 150
         let defaultWidth: CGFloat = 92
         let baseWidth: CGFloat
 
-        if overlayState.isCommandMode {
-            baseWidth = commandModeWidth
+        if overlayState.recordingMode.hasModeIndicator {
+            baseWidth = modeWidth
         } else if overlayState.phase == .recording && overlayState.recordingTriggerMode == .toggle {
             baseWidth = toggleWidth
         } else {
@@ -303,7 +324,7 @@ final class RecordingOverlayManager {
 
     private func dismissAll() {
         lockedOverlayWidth = nil
-        overlayState.isCommandMode = false
+        overlayState.recordingMode = .dictation
         overlayState.showsTranscribingSpinner = false
         overlayState.updateVersion = ""
         if let panel = overlayWindow {
@@ -452,7 +473,6 @@ struct RecordingOverlayView: View {
     let onStopButtonPressed: () -> Void
     let onUpdateOverlayPressed: () -> Void
 
-    private let leadingAccessoryWidth: CGFloat = 24
     private let trailingAccessoryWidth: CGFloat = 32
 
     private var showsLiveRecordingContent: Bool {
@@ -471,32 +491,9 @@ struct RecordingOverlayView: View {
                 UpdateAvailableOverlayView(onPress: onUpdateOverlayPressed)
             } else {
                 ZStack {
-                    Group {
-                        if state.phase == .initializing {
-                            InitializingDotsView()
-                                .transition(.opacity)
-                        } else if showsLiveRecordingContent {
-                            WaveformView(
-                                audioLevel: state.audioLevel,
-                                showsActivityPulse: state.phase == .recording
-                            )
-                                .transition(.opacity)
-                        } else {
-                            ProcessingWaveformView()
-                                .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                        }
-                    }
+                    centerContent
 
                     HStack {
-                        Group {
-                            if state.isCommandMode {
-                                CommandModeIndicator()
-                                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                            }
-                        }
-                        .frame(width: leadingAccessoryWidth, alignment: .center)
-                        .frame(maxHeight: .infinity, alignment: .center)
-
                         Spacer(minLength: 0)
 
                         Group {
@@ -521,18 +518,54 @@ struct RecordingOverlayView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.spring(response: 0.28, dampingFraction: 0.8), value: state.phase)
         .animation(.spring(response: 0.28, dampingFraction: 0.8), value: state.recordingTriggerMode)
-        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: state.isCommandMode)
+        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: state.recordingMode)
+    }
+
+    @ViewBuilder
+    private var centerContent: some View {
+        if state.phase == .initializing {
+            centeredModeGroup {
+                InitializingDotsView()
+                    .transition(.opacity)
+            }
+        } else if showsLiveRecordingContent {
+            centeredModeGroup {
+                WaveformView(
+                    audioLevel: state.audioLevel,
+                    showsActivityPulse: state.phase == .recording
+                )
+                .transition(.opacity)
+            }
+        } else {
+            ProcessingWaveformView()
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+        }
+    }
+
+    private func centeredModeGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: state.recordingMode.hasModeIndicator ? 7 : 0) {
+            if state.recordingMode.hasModeIndicator {
+                RecordingModeIndicator(mode: state.recordingMode)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+            content()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 }
 
-// MARK: - Transcribing Indicator
+// MARK: - Mode Indicator
 
-struct CommandModeIndicator: View {
+struct RecordingModeIndicator: View {
+    let mode: RecordingOverlayMode
+
     var body: some View {
-        Image(systemName: "pencil")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.92))
-            .frame(width: 16, height: 16, alignment: .center)
+        if let systemImage = mode.indicatorSystemImage {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+                .frame(width: 16, height: 16, alignment: .center)
+        }
     }
 }
 
