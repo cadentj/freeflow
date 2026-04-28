@@ -1,46 +1,5 @@
 import AppKit
 
-enum CommandModeStyle: String, CaseIterable, Codable, Identifiable {
-    case automatic
-    case manual
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .automatic: return "Automatic"
-        case .manual: return "Manual"
-        }
-    }
-}
-
-enum CommandModeManualModifier: String, CaseIterable, Codable, Identifiable {
-    case command
-    case control
-    case option
-    case shift
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .command: return "Command"
-        case .control: return "Control"
-        case .option: return "Option"
-        case .shift: return "Shift"
-        }
-    }
-
-    var shortcutModifier: ShortcutModifiers {
-        switch self {
-        case .command: return .command
-        case .control: return .control
-        case .option: return .option
-        case .shift: return .shift
-        }
-    }
-}
-
 enum JournalModeModifier: String, CaseIterable, Codable, Identifiable {
     case command
     case control
@@ -65,18 +24,6 @@ enum JournalModeModifier: String, CaseIterable, Codable, Identifiable {
         case .option: return .option
         case .shift: return .shift
         }
-    }
-}
-
-extension CommandModeManualModifier {
-    var journalModeModifier: JournalModeModifier {
-        JournalModeModifier(rawValue: rawValue) ?? .control
-    }
-}
-
-extension JournalModeModifier {
-    var commandModeManualModifier: CommandModeManualModifier {
-        CommandModeManualModifier(rawValue: rawValue) ?? .option
     }
 }
 

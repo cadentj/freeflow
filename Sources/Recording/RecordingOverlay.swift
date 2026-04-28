@@ -14,7 +14,6 @@ final class RecordingOverlayState: ObservableObject {
 
 enum RecordingOverlayMode: Equatable {
     case dictation
-    case edit
     case journal
 
     var hasModeIndicator: Bool {
@@ -25,8 +24,6 @@ enum RecordingOverlayMode: Equatable {
         switch self {
         case .dictation:
             return nil
-        case .edit:
-            return "pencil"
         case .journal:
             return "book.closed.fill"
         }

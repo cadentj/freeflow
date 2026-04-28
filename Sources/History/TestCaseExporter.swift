@@ -127,7 +127,7 @@ struct TestCaseExporter {
                 "app_name": item.contextAppName ?? "",
                 "bundle_identifier": item.contextBundleIdentifier ?? "",
                 "window_title": item.contextWindowTitle ?? "",
-                "selected_text": item.capturedSelection ?? item.selectedText ?? ""
+                "selected_text": item.capturedSelection ?? ""
             ] as [String: Any],
             "pipeline": pipeline,
             "settings": [

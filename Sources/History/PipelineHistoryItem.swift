@@ -2,14 +2,11 @@ import Foundation
 
 enum PipelineHistoryItemIntent: String, Codable {
     case dictation
-    case commandAutomatic = "command:automatic"
-    case commandManual = "command:manual"
     case journal
 }
 
 struct PipelineHistoryItem: Identifiable, Codable {
     let intent: PipelineHistoryItemIntent
-    let selectedText: String?
     let capturedSelection: String?
     let id: UUID
     let timestamp: Date
@@ -32,7 +29,6 @@ struct PipelineHistoryItem: Identifiable, Codable {
 
     init(
         intent: PipelineHistoryItemIntent = .dictation,
-        selectedText: String? = nil,
         capturedSelection: String? = nil,
         id: UUID = UUID(),
         timestamp: Date,
@@ -54,7 +50,6 @@ struct PipelineHistoryItem: Identifiable, Codable {
         contextWindowTitle: String? = nil
     ) {
         self.intent = intent
-        self.selectedText = selectedText
         self.capturedSelection = capturedSelection
         self.id = id
         self.timestamp = timestamp

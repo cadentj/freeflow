@@ -71,10 +71,6 @@ FreeFlow is a free Mac dictation app inspired by [Wispr Flow](https://wisprflow.
 - **Custom vocabulary:** Add names, jargon, and project-specific words that FreeFlow should preserve during cleanup.
 - **OpenAI-compatible providers:** Use Groq by default, or configure a custom model and API URL in settings.
 
-## Edit Mode
-
-Edit Mode lets you highlight existing text and transform it with a spoken instruction, like "make this shorter" or "turn this into bullets." Enable it in settings, then use your normal dictation shortcut on selected text, or choose Manual mode to require an extra modifier key.
-
 ## Privacy
 
 There is no FreeFlow server, so FreeFlow does not store or retain your data. The only information that leaves your computer are API calls to your configured transcription and LLM provider.
