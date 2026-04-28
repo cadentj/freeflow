@@ -25,7 +25,7 @@ ICON_SOURCE = Resources/AppIcon-Source.png
 ICON_ICNS = Resources/AppIcon.icns
 endif
 
-.PHONY: all clean run icon dmg codesign-dmg notarize
+.PHONY: all clean run icon dmg codesign-dmg notarize test
 
 all: $(APP_EXECUTABLE_TARGET)
 
@@ -123,3 +123,6 @@ clean:
 
 run: all
 	open "$(APP_BUNDLE)"
+
+test:
+	swift run FreeFlowCoreTestRunner

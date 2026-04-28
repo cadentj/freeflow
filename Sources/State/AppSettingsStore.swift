@@ -24,7 +24,6 @@ struct AppSettingsStore {
         static let customContextPromptLastModified = "custom_context_prompt_last_modified"
         static let contextScreenshotMaxDimension = "context_screenshot_max_dimension"
         static let shortcutStartDelay = "shortcut_start_delay"
-        static let preserveClipboard = "preserve_clipboard"
         static let pressEnterVoiceCommand = "press_enter_voice_command_enabled"
         static let alertSoundsEnabled = "alert_sounds_enabled"
         static let soundVolume = "sound_volume"
@@ -107,7 +106,6 @@ struct AppSettingsStore {
         let customContextPromptLastModified: String
         let outputLanguage: String
         let shortcutStartDelay: TimeInterval
-        let preserveClipboard: Bool
         let realtimeStreamingEnabled: Bool
         let realtimeStreamingModel: String
         let dictationAudioInterruptionEnabled: Bool
@@ -202,9 +200,6 @@ struct AppSettingsStore {
             customContextPromptLastModified: UserDefaults.standard.string(forKey: Key.customContextPromptLastModified) ?? "",
             outputLanguage: UserDefaults.standard.string(forKey: Key.outputLanguage) ?? "",
             shortcutStartDelay: max(0, UserDefaults.standard.double(forKey: Key.shortcutStartDelay)),
-            preserveClipboard: UserDefaults.standard.object(forKey: Key.preserveClipboard) == nil
-                ? true
-                : UserDefaults.standard.bool(forKey: Key.preserveClipboard),
             realtimeStreamingEnabled: UserDefaults.standard.bool(forKey: Key.realtimeStreamingEnabled),
             realtimeStreamingModel: UserDefaults.standard.string(forKey: Key.realtimeStreamingModel) ?? "",
             dictationAudioInterruptionEnabled: UserDefaults.standard.bool(forKey: Key.dictationAudioInterruptionEnabled),

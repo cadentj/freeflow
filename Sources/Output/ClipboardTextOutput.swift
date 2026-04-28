@@ -89,17 +89,13 @@ enum ClipboardTextOutput {
         keyUp?.post(tap: .cgSessionEventTap)
     }
 
-    static func writeTranscriptToPasteboard(
-        _ transcript: String,
-        preserveClipboard: Bool
-    ) -> PendingClipboardRestore? {
+    static func writeTranscriptToPasteboard(_ transcript: String) -> PendingClipboardRestore {
         let pasteboard = NSPasteboard.general
-        let snapshot = preserveClipboard ? PreservedPasteboardSnapshot(pasteboard: pasteboard) : nil
+        let snapshot = PreservedPasteboardSnapshot(pasteboard: pasteboard)
 
         pasteboard.clearContents()
         pasteboard.setString(transcript, forType: .string)
 
-        guard let snapshot else { return nil }
         return PendingClipboardRestore(snapshot: snapshot, expectedChangeCount: pasteboard.changeCount)
     }
 
