@@ -1132,9 +1132,7 @@ struct GeneralSettingsView: View {
 
     private var clipboardSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Toggle("Preserve clipboard after paste", isOn: $appState.preserveClipboard)
-
-            Text("\(AppName.displayName) will temporarily place the transcript on your clipboard to paste it, then restore whatever was there before. If you copy something else before the restore happens, \(AppName.displayName) leaves it alone.")
+            Text("\(AppName.displayName) temporarily places the transcript on your clipboard to paste it, then restores whatever was there before. If you copy something else before the restore happens, \(AppName.displayName) leaves it alone.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

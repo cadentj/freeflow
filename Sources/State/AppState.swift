@@ -240,12 +240,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    @Published var preserveClipboard: Bool {
-        didSet {
-            UserDefaults.standard.set(preserveClipboard, forKey: AppSettingsStore.Key.preserveClipboard)
-        }
-    }
-
     @Published var isPressEnterVoiceCommandEnabled: Bool {
         didSet {
             UserDefaults.standard.set(isPressEnterVoiceCommandEnabled, forKey: AppSettingsStore.Key.pressEnterVoiceCommand)
@@ -275,13 +269,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    @Published var isRecording = false {
+    var isRecording: Bool {
+        dictationPhase.isRecording
+    }
+
+    var isTranscribing: Bool {
+        dictationPhase.isTranscribing
+    }
+
+    @Published private(set) var dictationPhase: DictationPhase = .idle {
         didSet {
-            guard oldValue != isRecording else { return }
+            guard oldValue.isRecording != dictationPhase.isRecording else { return }
             RecordingStateFlagStore.writeRecordingStateFlag(isRecording)
         }
     }
-    @Published var isTranscribing = false
     @Published var retryingItemIDs: Set<UUID> = []
     @Published var lastTranscript: String = ""
     @Published var errorMessage: String?
@@ -333,6 +334,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var audioDeviceObservers: [NSObjectProtocol] = []
     private var needsMicrophoneRefreshAfterRecording = false
     private let pipelineHistoryStore = PipelineHistoryStore()
+    private let dictationReducer = DictationLifecycleReducer()
     private let shortcutSessionController = DictationShortcutSessionController()
     private var activeRecordingTriggerMode: RecordingTriggerMode?
     private var currentSessionIntent: SessionIntent = .dictation
@@ -400,7 +402,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.customContextPromptLastModified = loadedSettings.customContextPromptLastModified
         self.outputLanguage = loadedSettings.outputLanguage
         self.shortcutStartDelay = loadedSettings.shortcutStartDelay
-        self.preserveClipboard = loadedSettings.preserveClipboard
         self.realtimeStreamingEnabled = loadedSettings.realtimeStreamingEnabled
         self.realtimeStreamingModel = loadedSettings.realtimeStreamingModel
         self.dictationAudioInterruptionEnabled = loadedSettings.dictationAudioInterruptionEnabled
@@ -1099,15 +1100,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         switch action {
         case .start(let mode):
             os_log(.info, log: recordingLog, "Shortcut start fired for mode %{public}@", mode.rawValue)
-            scheduleShortcutStart(mode: mode)
+            requestRecordingStart(mode: mode)
         case .stop:
-            cancelPendingShortcutStart()
-            guard isRecording else {
-                shortcutSessionController.reset()
-                activeRecordingTriggerMode = nil
-                return
+            if pendingShortcutStartMode != nil {
+                sendLifecycleEvent(.pendingStartCancelled)
+            } else {
+                sendLifecycleEvent(.stopRequested)
             }
-            stopAndTranscribe()
         case .switchedToToggle:
             if isRecording {
                 activeRecordingTriggerMode = .toggle
@@ -1118,14 +1117,86 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    private func sendLifecycleEvent(_ event: DictationLifecycleEvent) {
+        let transition = dictationReducer.reduce(phase: dictationPhase, event: event)
+        dictationPhase = transition.phase
+        for effect in transition.effects {
+            executeLifecycleEffect(effect)
+        }
+    }
+
+    private func executeLifecycleEffect(_ effect: DictationLifecycleEffect) {
+        switch effect {
+        case .scheduleShortcutStart(let delay):
+            schedulePendingShortcutStart(delay: delay)
+        case .cancelPendingShortcutStart:
+            cancelPendingShortcutStart()
+            if case .cancelled = dictationPhase {
+                statusText = "Cancelled"
+                scheduleReadyStatusReset(after: 2, matching: ["Cancelled"])
+            }
+        case .requestMicrophonePermission:
+            requestMicrophonePermission()
+        case .pauseHotkeysForPermission:
+            prepareForMicrophonePermissionPrompt()
+        case .resumeHotkeysAfterPermission:
+            isAwaitingMicrophonePermission = false
+            restartHotkeyMonitoring()
+        case .startRecording(let session):
+            startRecording(session: session)
+        case .stopRecording:
+            stopAndTranscribe()
+        case .startTranscription:
+            break
+        case .cancelRecording:
+            cancelActiveRecordingForLifecycle()
+        case .cancelTranscription:
+            cancelTranscriptionForLifecycle()
+        case .resetShortcutSession:
+            shortcutSessionController.reset()
+        case .resetToReady:
+            break
+        case .reportFailure(let message):
+            reportLifecycleFailure(message)
+        }
+    }
+
+    private func lifecycleIntent(from intent: SessionIntent) -> DictationLifecycleIntent {
+        intent.isJournalMode ? .journal : .dictation
+    }
+
+    private func sessionIntent(from intent: DictationLifecycleIntent) -> SessionIntent {
+        intent.isJournalMode ? .journal : .dictation
+    }
+
+    private func reportLifecycleFailure(_ message: String) {
+        if message == "Microphone permission denied" {
+            errorMessage = "Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone."
+            statusText = "No Microphone"
+            activeRecordingTriggerMode = nil
+            currentSessionIntent = .dictation
+            shortcutSessionController.reset()
+            showMicrophonePermissionAlert()
+            return
+        }
+
+        if errorMessage == nil {
+            errorMessage = message
+        }
+        if statusText == "Ready" || statusText == "Starting..." || statusText == "Transcribing..." {
+            statusText = "Error"
+        }
+        overlayManager.dismiss()
+    }
+
     private func handleEscapeKeyPress() -> Bool {
         if isTranscribing {
-            cancelTranscription()
+            sendLifecycleEvent(.cancelRequested)
             return true
         }
 
         if pendingShortcutStartMode == .toggle || activeRecordingTriggerMode == .toggle {
-            cancelToggleShortcutSession()
+            sendLifecycleEvent(.cancelRequested)
             return true
         }
 
@@ -1134,23 +1205,29 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     func toggleRecording() {
         os_log(.info, log: recordingLog, "toggleRecording() called, isRecording=%{public}d", isRecording)
-        cancelPendingShortcutStart()
         if isRecording {
-            stopAndTranscribe()
+            sendLifecycleEvent(.stopRequested)
+        } else if !dictationPhase.allowsNewRecordingRequest {
+            return
         } else {
+            cancelPendingShortcutStart()
             shortcutSessionController.beginManual(mode: .toggle)
-            startRecording(triggerMode: .toggle)
+            requestRecordingStart(mode: .toggle)
         }
     }
 
     private func handleOverlayStopButtonPressed() {
         guard isRecording, activeRecordingTriggerMode == .toggle else { return }
-        stopAndTranscribe()
+        sendLifecycleEvent(.stopRequested)
     }
 
-    private func cancelToggleShortcutSession() {
-        guard pendingShortcutStartMode == .toggle || activeRecordingTriggerMode == .toggle else { return }
-
+    private func cancelActiveRecordingForLifecycle() {
+        let isFailure: Bool
+        if case .failed = dictationPhase {
+            isFailure = true
+        } else {
+            isFailure = false
+        }
         cancelPendingShortcutStart()
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
@@ -1164,23 +1241,25 @@ final class AppState: ObservableObject, @unchecked Sendable {
         capturedContext = nil
         currentSessionIntent = .dictation
         pendingJournalModeInvocation = false
-        isRecording = false
-        errorMessage = nil
-        debugStatusMessage = "Cancelled"
-        statusText = "Cancelled"
+        if isFailure {
+            debugStatusMessage = "Recording failed"
+            statusText = "Error"
+        } else {
+            errorMessage = nil
+            debugStatusMessage = "Cancelled"
+            statusText = "Cancelled"
+        }
         overlayManager.dismiss()
         tearDownRealtimeService()
         audioRecorder.cancelRecording()
         restoreAudioInterruptionIfNeeded()
         refreshAvailableMicrophonesIfNeeded()
-        if !isRecording && !isTranscribing && statusText == "Cancelled" {
+        if !isFailure && statusText == "Cancelled" {
             scheduleReadyStatusReset(after: 2, matching: ["Cancelled"])
         }
     }
 
-    private func cancelTranscription() {
-        guard isTranscribing else { return }
-
+    private func cancelTranscriptionForLifecycle() {
         transcriptionTask?.cancel()
         transcriptionTask = nil
         contextCaptureTask?.cancel()
@@ -1190,8 +1269,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         activeRecordingTriggerMode = nil
         currentSessionIntent = .dictation
         pendingJournalModeInvocation = false
-        isRecording = false
-        isTranscribing = false
         errorMessage = nil
         debugStatusMessage = "Cancelled"
         statusText = "Cancelled"
@@ -1202,22 +1279,38 @@ final class AppState: ObservableObject, @unchecked Sendable {
             self.transcribingAudioFileName = nil
         }
         refreshAvailableMicrophonesIfNeeded()
-        if !isRecording && !isTranscribing && statusText == "Cancelled" {
+        if statusText == "Cancelled" {
             scheduleReadyStatusReset(after: 2, matching: ["Cancelled"])
         }
     }
 
-    private func scheduleShortcutStart(mode: RecordingTriggerMode) {
+    private func requestRecordingStart(mode: RecordingTriggerMode) {
         cancelPendingShortcutStart(resetMode: false)
-        pendingJournalModeInvocation = hotkeyManager.currentPressedModifiers.contains(
+        let journalModeRequested = hotkeyManager.currentPressedModifiers.contains(
             journalModeModifier.shortcutModifier
         )
+        guard let intent = resolveSessionIntent(
+            triggerMode: mode,
+            journalModeRequested: journalModeRequested
+        ) else { return }
+
+        sendLifecycleEvent(.startRequested(
+            triggerMode: mode,
+            intent: lifecycleIntent(from: intent),
+            journalModeRequested: journalModeRequested,
+            delay: shortcutStartDelay
+        ))
+    }
+
+    private func schedulePendingShortcutStart(delay: TimeInterval) {
+        guard case .pendingShortcutStart(let pending) = dictationPhase else { return }
+        pendingJournalModeInvocation = pending.session.journalModeRequested
+        let mode = pending.session.triggerMode
         pendingShortcutStartMode = mode
-        let delay = shortcutStartDelay
 
         guard delay > 0 else {
             pendingShortcutStartMode = nil
-            startRecording(triggerMode: mode)
+            sendLifecycleEvent(.pendingStartElapsed)
             return
         }
 
@@ -1232,7 +1325,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 guard let self, let pendingMode = self.pendingShortcutStartMode else { return }
                 self.pendingShortcutStartTask = nil
                 self.pendingShortcutStartMode = nil
-                self.startRecording(triggerMode: pendingMode)
+                if pendingMode == mode {
+                    self.sendLifecycleEvent(.pendingStartElapsed)
+                }
             }
         }
     }
@@ -1279,17 +1374,26 @@ final class AppState: ObservableObject, @unchecked Sendable {
         scheduleReadyStatusReset(after: 2, matching: ["Fix Journal Mode modifier"])
     }
 
-    private func startRecording(triggerMode: RecordingTriggerMode) {
+    private func startRecording(session: DictationLifecycleSession) {
         let t0 = CFAbsoluteTimeGetCurrent()
         os_log(.info, log: recordingLog, "startRecording() entered")
-        guard !isRecording && !isTranscribing else { return }
-        let scheduledJournalModeInvocation = pendingJournalModeInvocation
+        guard !audioRecorder.isRecording, transcriptionTask == nil else { return }
+        let triggerMode = session.triggerMode
+        let sessionIntent = sessionIntent(from: session.intent)
+        pendingJournalModeInvocation = session.journalModeRequested
         cancelPendingShortcutStart()
+        if triggerMode == .toggle, shortcutSessionController.activeMode == nil {
+            shortcutSessionController.beginManual(mode: .toggle)
+        }
         guard prepareRecordingStart(
             triggerMode: triggerMode,
-            journalModeRequested: scheduledJournalModeInvocation,
+            journalModeRequested: session.journalModeRequested,
+            preparedIntent: sessionIntent,
             startedAt: t0
-        ) else { return }
+        ) else {
+            sendLifecycleEvent(.recordingFailed(message: errorMessage ?? "Failed to start recording"))
+            return
+        }
         guard ensureMicrophoneAccess() else { return }
         os_log(.info, log: recordingLog, "mic access check passed: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
         applyAudioInterruptionIfNeeded()
@@ -1300,6 +1404,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func prepareRecordingStart(
         triggerMode: RecordingTriggerMode,
         journalModeRequested: Bool? = nil,
+        preparedIntent: SessionIntent? = nil,
         startedAt: CFAbsoluteTime? = nil
     ) -> Bool {
         activeRecordingTriggerMode = triggerMode
@@ -1316,12 +1421,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
             os_log(.info, log: recordingLog, "accessibility check passed: %.3fms", (CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
         }
 
-        let journalModeRequested = journalModeRequested
-            ?? hotkeyManager.currentPressedModifiers.contains(journalModeModifier.shortcutModifier)
-        guard let resolvedIntent = resolveSessionIntent(
-            triggerMode: triggerMode,
-            journalModeRequested: journalModeRequested
-        ) else { return false }
+        let resolvedIntent: SessionIntent
+        if let providedIntent = preparedIntent {
+            resolvedIntent = providedIntent
+        } else {
+            let journalModeRequested = journalModeRequested
+                ?? hotkeyManager.currentPressedModifiers.contains(journalModeModifier.shortcutModifier)
+            guard let intent = resolveSessionIntent(
+                triggerMode: triggerMode,
+                journalModeRequested: journalModeRequested
+            ) else { return false }
+            resolvedIntent = intent
+        }
 
         hasScreenRecordingPermission = hasScreenCapturePermission()
 
@@ -1354,53 +1465,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case .authorized:
             return true
         case .notDetermined:
-            guard let triggerMode = activeRecordingTriggerMode else {
-                return false
-            }
-
-            prepareForMicrophonePermissionPrompt(
-                triggerMode: triggerMode,
-                journalModeRequested: currentSessionIntent.isJournalMode
-            )
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                DispatchQueue.main.async {
-                    guard let strongSelf = self else { return }
-                    let pendingTriggerMode = strongSelf.pendingMicrophonePermissionTriggerMode
-                    let pendingJournalRequested = strongSelf.pendingMicrophonePermissionJournalRequested
-                    strongSelf.pendingMicrophonePermissionTriggerMode = nil
-                    strongSelf.pendingMicrophonePermissionJournalRequested = nil
-                    strongSelf.isAwaitingMicrophonePermission = false
-                    strongSelf.restartHotkeyMonitoring()
-
-                    guard let triggerMode = pendingTriggerMode else { return }
-                    if granted {
-                        strongSelf.errorMessage = nil
-                        if triggerMode == .toggle {
-                            guard strongSelf.prepareRecordingStart(
-                                triggerMode: .toggle,
-                                journalModeRequested: pendingJournalRequested
-                            ) else { return }
-                            strongSelf.shortcutSessionController.beginManual(mode: .toggle)
-                            strongSelf.applyAudioInterruptionIfNeeded()
-                            strongSelf.beginRecording(triggerMode: .toggle)
-                        } else {
-                            strongSelf.currentSessionIntent = .dictation
-                            strongSelf.statusText = "Microphone access granted. Press and hold again to record."
-                            strongSelf.scheduleReadyStatusReset(
-                                after: 2,
-                                matching: ["Microphone access granted. Press and hold again to record."]
-                            )
-                        }
-                    } else {
-                        strongSelf.errorMessage = "Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone."
-                        strongSelf.statusText = "No Microphone"
-                        strongSelf.activeRecordingTriggerMode = nil
-                        strongSelf.currentSessionIntent = .dictation
-                        strongSelf.shortcutSessionController.reset()
-                        strongSelf.showMicrophonePermissionAlert()
-                    }
-                }
-            }
+            sendLifecycleEvent(.microphonePermissionRequired)
             return false
         default:
             errorMessage = "Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone."
@@ -1409,17 +1474,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
             currentSessionIntent = .dictation
             shortcutSessionController.reset()
             showMicrophonePermissionAlert()
+            sendLifecycleEvent(.recordingFailed(message: errorMessage ?? "Microphone permission denied"))
             return false
         }
     }
 
-    private func prepareForMicrophonePermissionPrompt(
-        triggerMode: RecordingTriggerMode,
-        journalModeRequested: Bool?
-    ) {
+    private func prepareForMicrophonePermissionPrompt() {
+        guard case .awaitingMicrophonePermission(let pending) = dictationPhase else { return }
         isAwaitingMicrophonePermission = true
-        pendingMicrophonePermissionTriggerMode = triggerMode
-        pendingMicrophonePermissionJournalRequested = journalModeRequested
+        pendingMicrophonePermissionTriggerMode = pending.session.triggerMode
+        pendingMicrophonePermissionJournalRequested = pending.session.journalModeRequested
         hotkeyManager.stop()
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
@@ -1429,6 +1493,25 @@ final class AppState: ObservableObject, @unchecked Sendable {
         audioLevelCancellable?.cancel()
         audioLevelCancellable = nil
         overlayManager.dismiss()
+    }
+
+    private func requestMicrophonePermission() {
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.pendingMicrophonePermissionTriggerMode = nil
+                self.pendingMicrophonePermissionJournalRequested = nil
+                self.sendLifecycleEvent(.microphonePermissionResolved(granted: granted))
+                if granted, !self.dictationPhase.isRecording {
+                    self.currentSessionIntent = .dictation
+                    self.statusText = "Microphone access granted. Press and hold again to record."
+                    self.scheduleReadyStatusReset(
+                        after: 2,
+                        matching: ["Microphone access granted. Press and hold again to record."]
+                    )
+                }
+            }
+        }
     }
 
     private func applyAudioInterruptionIfNeeded() {
@@ -1459,7 +1542,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         clearPendingOverlayDismissToken()
         errorMessage = nil
 
-        isRecording = true
         statusText = "Starting..."
         hasShownScreenshotPermissionAlert = false
 
@@ -1488,6 +1570,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 guard let self else { return }
                 self.cancelRecordingInitializationTimer()
                 os_log(.info, log: recordingLog, "first real audio — transitioning to waveform")
+                self.sendLifecycleEvent(.recordingReady)
                 self.statusText = "Recording..."
                 self.clearPendingOverlayDismissToken()
                 if overlayShown {
@@ -1555,8 +1638,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         tearDownRealtimeService()
         audioRecorder.cleanup()
         restoreAudioInterruptionIfNeeded()
-        isRecording = false
-        isTranscribing = false
         transcriptionTask?.cancel()
         transcriptionTask = nil
         if let transcribingAudioFileName {
@@ -1570,6 +1651,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         errorMessage = formattedRecordingStartError(error)
         statusText = "Error"
         overlayManager.dismiss()
+        sendLifecycleEvent(.recordingFailed(message: errorMessage ?? "Failed to start recording"))
         refreshAvailableMicrophonesIfNeeded()
     }
 
@@ -1758,7 +1840,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         audioLevelCancellable = nil
         capturedContext = nil
         contextCaptureTask = nil
-        isRecording = false
         restoreAudioInterruptionIfNeeded()
     }
 
@@ -1774,7 +1855,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func beginTranscribingUIState() {
-        isTranscribing = true
         statusText = "Preparing audio..."
         errorMessage = nil
         playAlertSound(named: "Pop")
@@ -1795,7 +1875,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         audioRecorder.stopRecording { [weak self] fileURL in
             guard let self else { return }
             guard let fileURL else {
-                self.isTranscribing = false
+                self.sendLifecycleEvent(.audioFilePrepared(available: false))
                 self.errorMessage = "No audio recorded"
                 self.statusText = "Error"
                 self.overlayManager.dismiss()
@@ -1814,6 +1894,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             self.transcribingAudioFileName = savedAudioFile?.fileName
             self.statusText = "Transcribing..."
             self.debugStatusMessage = "Transcribing audio"
+            self.sendLifecycleEvent(.audioFilePrepared(available: true))
 
             self.overlayManager.showTranscribing()
 
@@ -1864,7 +1945,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
                                 self.transcriptionTask = nil
                                 self.transcribingAudioFileName = nil
                                 self.errorMessage = "Unable to write journal: \(error.localizedDescription)"
-                                self.isTranscribing = false
                                 self.statusText = "Journal error"
                                 self.debugStatusMessage = "Journal write failed"
                                 self.lastTranscript = ""
@@ -1887,6 +1967,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                                 )
                                 self.overlayManager.dismiss()
                                 self.cleanupAudioAfterStop()
+                                self.sendLifecycleEvent(.transcriptionFailed(message: error.localizedDescription))
                                 self.scheduleReadyStatusReset(after: 3, matching: ["Journal error"])
                             }
                             return
@@ -1898,7 +1979,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             self.transcriptionTask = nil
                             self.transcribingAudioFileName = nil
                             self.errorMessage = nil
-                            self.isTranscribing = false
                             self.debugStatusMessage = "Done"
                             self.lastTranscript = trimmedRawTranscript
                             self.lastRawTranscript = trimmedRawTranscript
@@ -1935,6 +2015,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             self.clearPendingOverlayDismissToken()
                             self.overlayManager.dismiss()
                             self.cleanupAudioAfterStop()
+                            self.sendLifecycleEvent(.transcriptionSucceeded)
                             self.scheduleReadyStatusReset(
                                 after: 3,
                                 matching: ["Logged to journal", "Nothing to journal"]
@@ -2051,10 +2132,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         transcriptionTask = nil
         transcribingAudioFileName = nil
         lastTranscript = trimmedFinalTranscript
-        isTranscribing = false
+        sendLifecycleEvent(.transcriptionSucceeded)
         debugStatusMessage = "Done"
 
-        let completionStatusText = preserveClipboard ? "Pasted at cursor!" : "Copied to clipboard!"
+        let completionStatusText = "Pasted at cursor!"
         let enterOnlyStatusText = "Pressed Enter"
         let shouldPressEnterAfterPaste = parsedTranscript.shouldPressEnterAfterPaste
         let shouldPersistRawDictationFallback: Bool
@@ -2111,7 +2192,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         transcriptionTask = nil
         transcribingAudioFileName = nil
         errorMessage = error.localizedDescription
-        isTranscribing = false
         statusText = "Error"
         overlayManager.dismiss()
         lastPostProcessedTranscript = ""
@@ -2133,6 +2213,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             audioFileName: audioFileName
         )
         cleanupAudioAfterStop()
+        sendLifecycleEvent(.transcriptionFailed(message: error.localizedDescription))
     }
 
     static func resolvedSystemPrompt(_ customSystemPrompt: String) -> String {
@@ -2469,7 +2550,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func writeTranscriptToPasteboard(_ transcript: String) -> PendingClipboardRestore? {
-        ClipboardTextOutput.writeTranscriptToPasteboard(transcript, preserveClipboard: preserveClipboard)
+        ClipboardTextOutput.writeTranscriptToPasteboard(transcript)
     }
 
     private func restoreClipboardIfNeeded(_ pendingRestore: PendingClipboardRestore?) {
@@ -2529,6 +2610,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 return
             }
             self.statusText = "Ready"
+            self.sendLifecycleEvent(.readyReset)
         }
     }
 }
