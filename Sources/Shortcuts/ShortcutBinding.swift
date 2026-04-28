@@ -1,20 +1,6 @@
 import AppKit
 
-enum CommandModeStyle: String, CaseIterable, Codable, Identifiable {
-    case automatic
-    case manual
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .automatic: return "Automatic"
-        case .manual: return "Manual"
-        }
-    }
-}
-
-enum CommandModeManualModifier: String, CaseIterable, Codable, Identifiable {
+enum JournalModeModifier: String, CaseIterable, Codable, Identifiable {
     case command
     case control
     case option

@@ -89,7 +89,6 @@ final class PipelineHistoryStore {
                 request.predicate = NSPredicate(format: "id == %@", item.id as CVarArg)
                 guard let entity = try container.viewContext.fetch(request).first else { return }
                 entity.intent = item.intent.rawValue
-                entity.selectedText = item.selectedText
                 entity.capturedSelection = item.capturedSelection
                 entity.rawTranscript = item.rawTranscript
                 entity.postProcessedTranscript = item.postProcessedTranscript
@@ -191,7 +190,6 @@ final class PipelineHistoryStore {
                 let entity = PipelineHistoryEntry(context: context)
                 entity.id = item.id
                 entity.intent = item.intent.rawValue
-                entity.selectedText = item.selectedText
                 entity.capturedSelection = item.capturedSelection
                 entity.timestamp = item.timestamp
                 entity.rawTranscript = item.rawTranscript
@@ -268,7 +266,6 @@ final class PipelineHistoryStore {
     private static func makeHistoryItem(from entity: PipelineHistoryEntry) -> PipelineHistoryItem {
         PipelineHistoryItem(
             intent: PipelineHistoryItemIntent(rawValue: entity.intent ?? "") ?? .dictation,
-            selectedText: entity.selectedText,
             capturedSelection: entity.capturedSelection,
             id: entity.id,
             timestamp: entity.timestamp ?? Date(),
@@ -300,7 +297,6 @@ final class PipelineHistoryStore {
 
         entity.properties = [
             makeAttribute(name: "intent", type: .stringAttributeType, isOptional: true, defaultValue: "dictation"),
-            makeAttribute(name: "selectedText", type: .stringAttributeType, isOptional: true),
             makeAttribute(name: "capturedSelection", type: .stringAttributeType, isOptional: true),
             makeAttribute(name: "id", type: .UUIDAttributeType, isOptional: false),
             makeAttribute(name: "timestamp", type: .dateAttributeType, isOptional: false),
@@ -345,7 +341,6 @@ final class PipelineHistoryStore {
 final class PipelineHistoryEntry: NSManagedObject {
     @NSManaged var id: UUID
     @NSManaged var intent: String?
-    @NSManaged var selectedText: String?
     @NSManaged var capturedSelection: String?
     @NSManaged var timestamp: Date?
     @NSManaged var rawTranscript: String?

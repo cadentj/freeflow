@@ -1,3 +1,34 @@
+## Local Journal Mode Build Notes
+
+NOTE: This is my personal fork of Freeflow with a "Journal Mode". 
+
+You can hold your normal dictation shortcut with the configured extra modifier to append the trimmed raw transcript to a daily Markdown file, without cleanup, paste, clipboard writes, voice macros, translation, or "press enter" handling.
+
+**I do not plan to upstream changes since the original repo is quite slop (commits directly to main, no directory structure and unorganized files). I plan to do a cleanup of this project at some point and fix up the UI, etc.**
+
+Build the local dev app:
+
+```bash
+make -B all CODESIGN_IDENTITY=-
+```
+
+Run it from the repo:
+
+```bash
+open "build/FreeFlow Dev.app"
+```
+
+Move the rebuilt dev app into Applications:
+
+```bash
+rm -rf "/Applications/FreeFlow Dev.app"
+cp -R "build/FreeFlow Dev.app" "/Applications/FreeFlow Dev.app"
+```
+
+Quit the official FreeFlow while testing `FreeFlow Dev`, since both apps can compete for the same global shortcuts.
+
+---
+
 <p align="center">
   <img src="Resources/AppIcon-Source.png" width="128" height="128" alt="FreeFlow icon">
 </p>
@@ -39,10 +70,6 @@ FreeFlow is a free Mac dictation app inspired by [Wispr Flow](https://wisprflow.
 - **Context-aware cleanup:** FreeFlow can read nearby app context so names, terms, and phrases are spelled correctly when you dictate into email, terminals, docs, and other apps.
 - **Custom vocabulary:** Add names, jargon, and project-specific words that FreeFlow should preserve during cleanup.
 - **OpenAI-compatible providers:** Use Groq by default, or configure a custom model and API URL in settings.
-
-## Edit Mode
-
-Edit Mode lets you highlight existing text and transform it with a spoken instruction, like "make this shorter" or "turn this into bullets." Enable it in settings, then use your normal dictation shortcut on selected text, or choose Manual mode to require an extra modifier key.
 
 ## Privacy
 

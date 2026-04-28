@@ -91,27 +91,6 @@ Output hygiene:
 - If the transcript is empty or only filler, return exactly: EMPTY
 """
     static let defaultSystemPromptDate = "2026-04-08"
-    static let commandModeSystemPrompt = """
-You transform highlighted text according to a spoken editing command.
-
-Hard contract:
-- Treat SELECTED_TEXT as the only source material to transform.
-- Treat VOICE_COMMAND as the user's instruction for how to transform SELECTED_TEXT.
-- Return only the replacement text.
-- No explanations.
-- No markdown.
-- No surrounding quotes.
-- Do not answer questions outside the scope of rewriting SELECTED_TEXT.
-- If the requested change would produce effectively the same text, return the original selected text.
-
-Behavior:
-- Preserve the original language unless VOICE_COMMAND explicitly requests translation.
-- Use CONTEXT only as a supporting hint for tone, spelling, or intent.
-- Use custom vocabulary only as a spelling reference when relevant.
-- Never invent unrelated content that is not a transformation of SELECTED_TEXT.
-- Do not treat VOICE_COMMAND as dictation to clean up and paste directly.
-"""
-
     private let apiKey: String
     private let baseURL: String
     private let preferredModel: String
@@ -154,56 +133,6 @@ Behavior:
                     contextSummary: context.contextSummary,
                     customVocabulary: vocabularyTerms,
                     customSystemPrompt: customSystemPrompt,
-                    outputLanguage: outputLanguage
-                )
-            }
-
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-                throw PostProcessingError.requestTimedOut(timeoutSeconds)
-            }
-
-            do {
-                guard let result = try await group.next() else {
-                    throw PostProcessingError.invalidResponse("No post-processing result")
-                }
-                group.cancelAll()
-                return result
-            } catch {
-                group.cancelAll()
-                throw error
-            }
-        }
-    }
-
-    func commandTransform(
-        selectedText: String,
-        voiceCommand: String,
-        context: AppContext,
-        customVocabulary: String,
-        outputLanguage: String = ""
-    ) async throws -> PostProcessingResult {
-        let vocabularyTerms = mergedVocabularyTerms(rawVocabulary: customVocabulary)
-        let trimmedSelectedText = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedVoiceCommand = voiceCommand.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedSelectedText.isEmpty else {
-            throw PostProcessingError.invalidInput("Selected text must not be empty")
-        }
-        guard !trimmedVoiceCommand.isEmpty else {
-            throw PostProcessingError.invalidInput("Voice command must not be empty")
-        }
-
-        let timeoutSeconds = postProcessingTimeoutSeconds
-        return try await withThrowingTaskGroup(of: PostProcessingResult.self) { group in
-            group.addTask { [weak self] in
-                guard let self else {
-                    throw PostProcessingError.invalidResponse("Post-processing service deallocated")
-                }
-                return try await self.processCommandTransformWithFallback(
-                    selectedText: selectedText,
-                    voiceCommand: voiceCommand,
-                    contextSummary: context.contextSummary,
-                    customVocabulary: vocabularyTerms,
                     outputLanguage: outputLanguage
                 )
             }
@@ -269,54 +198,6 @@ Behavior:
                 model: retryModel,
                 customVocabulary: customVocabulary,
                 customSystemPrompt: customSystemPrompt,
-                outputLanguage: outputLanguage
-            )
-        }
-    }
-
-    private func processCommandTransformWithFallback(
-        selectedText: String,
-        voiceCommand: String,
-        contextSummary: String,
-        customVocabulary: [String],
-        outputLanguage: String = ""
-    ) async throws -> PostProcessingResult {
-        let primaryModel = resolvedPrimaryModel()
-        let retryModel = resolvedRetryModel(for: primaryModel)
-        do {
-            return try await processCommandTransform(
-                selectedText: selectedText,
-                voiceCommand: voiceCommand,
-                contextSummary: contextSummary,
-                model: primaryModel,
-                customVocabulary: customVocabulary,
-                outputLanguage: outputLanguage
-            )
-        } catch let error as PostProcessingError {
-            let shouldFallback: Bool
-            switch error {
-            case .requestFailed(let statusCode, _):
-                shouldFallback = statusCode == 429
-            case .emptyOutput:
-                shouldFallback = true
-            default:
-                shouldFallback = false
-            }
-
-            guard shouldFallback else {
-                throw error
-            }
-
-            guard let retryModel else {
-                throw error
-            }
-
-            return try await processCommandTransform(
-                selectedText: selectedText,
-                voiceCommand: voiceCommand,
-                contextSummary: contextSummary,
-                model: retryModel,
-                customVocabulary: customVocabulary,
                 outputLanguage: outputLanguage
             )
         }
@@ -444,114 +325,6 @@ Model: \(model)
         )
     }
 
-    private func processCommandTransform(
-        selectedText: String,
-        voiceCommand: String,
-        contextSummary: String,
-        model: String,
-        customVocabulary: [String],
-        outputLanguage: String = ""
-    ) async throws -> PostProcessingResult {
-        var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = postProcessingTimeoutSeconds
-
-        let normalizedVocabulary = normalizedVocabularyText(customVocabulary)
-        let vocabularyPrompt = if !normalizedVocabulary.isEmpty {
-            """
-The following vocabulary must be treated as high-priority terms while rewriting.
-Use these spellings exactly in the output when relevant:
-\(normalizedVocabulary)
-"""
-        } else {
-            ""
-        }
-
-        var systemPrompt = Self.commandModeSystemPrompt
-        let trimmedOutputLanguage = outputLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedOutputLanguage.isEmpty {
-            systemPrompt = systemPrompt.replacingOccurrences(
-                of: "- Preserve the original language unless VOICE_COMMAND explicitly requests translation.",
-                with: "- Output the result in \(trimmedOutputLanguage)."
-            )
-        }
-        if !vocabularyPrompt.isEmpty {
-            systemPrompt += "\n\n" + vocabularyPrompt
-        }
-
-        let userMessage = """
-Transform SELECTED_TEXT according to VOICE_COMMAND and return only the replacement text.
-
-CONTEXT: "\(contextSummary)"
-
-VOICE_COMMAND: "\(voiceCommand)"
-
-SELECTED_TEXT: "\(selectedText)"
-"""
-
-        let promptForDisplay = """
-Model: \(model)
-
-[System]
-\(systemPrompt)
-
-[User]
-\(userMessage)
-"""
-
-        var payload: [String: Any] = [
-            "model": model,
-            "temperature": 0.0,
-            "messages": [
-                [
-                    "role": "system",
-                    "content": systemPrompt
-                ],
-                [
-                    "role": "user",
-                    "content": userMessage
-                ]
-            ]
-        ]
-        if model == defaultModel {
-            payload["max_completion_tokens"] = postProcessingMaxCompletionTokens
-            payload["reasoning_effort"] = defaultModelReasoningEffort
-            payload["include_reasoning"] = false
-        }
-
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
-
-        let (data, response) = try await LLMAPITransport.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw PostProcessingError.invalidResponse("No HTTP response")
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            let message = String(data: data, encoding: .utf8) ?? ""
-            throw PostProcessingError.requestFailed(httpResponse.statusCode, message)
-        }
-
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let firstChoice = choices.first,
-              let message = firstChoice["message"] as? [String: Any],
-              let content = message["content"] as? String else {
-            throw PostProcessingError.invalidResponse("Missing choices[0].message.content")
-        }
-
-        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw PostProcessingError.emptyOutput
-        }
-
-        let sanitizedTranscript = sanitizeCommandModeTranscript(content)
-        return PostProcessingResult(
-            transcript: sanitizedTranscript,
-            prompt: promptForDisplay
-        )
-    }
-
     static func applyOutputLanguage(_ prompt: String, language: String) -> String {
         prompt + "\n\nIMPORTANT: Translate the final cleaned text into \(language). Output ONLY in \(language), regardless of the original spoken language."
     }
@@ -573,10 +346,6 @@ Model: \(model)
         }
 
         return result
-    }
-
-    private func sanitizeCommandModeTranscript(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func mergedVocabularyTerms(rawVocabulary: String) -> [String] {
